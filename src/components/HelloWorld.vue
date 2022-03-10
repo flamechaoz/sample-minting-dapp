@@ -13,29 +13,63 @@
               <p>Chaind Id: {{currentChainId}}</p>
               <h3 v-if='currentChainId == "0x4"'>You are currently in Rinkeby Test network.</h3>
               <h3 v-if='currentChainId == "0x89"'>You are currently in Polygon mainnet.</h3>
-              <h3 v-if="isCorrectChain">cost: {{newMintingCost}}</h3>
-              <v-btn v-if="isCorrectChain" icon @click="mintAmount = (mintAmount == 1) ? mintAmount : mintAmount-1; newMintingCost = mintAmount * mintingCost;"><v-icon>mdi-minus-circle</v-icon></v-btn>
+              <h3 v-if='!isCorrectChain'>Please connect to the correct network! 😠</h3>
+              <h3 v-if="isCorrectChain">cost: {{mintingCostText}}</h3>
+              <v-btn v-if="isCorrectChain" icon @click="decrementMintAmount()"><v-icon>mdi-minus-circle</v-icon></v-btn>
               <b v-if="isCorrectChain">{{mintAmount}}</b>
-              <v-btn v-if="isCorrectChain" icon @click="mintAmount = (mintAmount == maxMintPerTx) ? mintAmount : mintAmount+1; newMintingCost = mintAmount * mintingCost;"><v-icon>mdi-plus-circle</v-icon></v-btn>
+              <v-btn v-if="isCorrectChain" icon @click="incrementMintAmount()"><v-icon>mdi-plus-circle</v-icon></v-btn>
               <br>
-              <v-btn v-if="isCorrectChain && (mintingCost != null) && (currentSupply != 0) && (maxSupply != 0) && (maxMintPerTx != 0)" class="my-3" @click="mint()">MINT</v-btn>
+              <v-btn
+                color="primary"
+                :loading="transactionLoading"
+                v-if="isCorrectChain && (currentSupply != maxSupply) && (mintingCost != null) && (currentSupply != 0) && (maxSupply != 0) && (maxMintPerTx != 0)"
+                class="my-3"
+                @click="mint()"
+              >
+                MINT
+              </v-btn>
             </v-col>
           </v-card-text>
         </v-card>
       </v-col>
     </v-row>
+
+    <v-col cols="auto">
+      <v-dialog
+        max-width="600"
+        v-model="transactionDialog"
+      >
+        <template v-slot:default="dialog">
+          <v-card>
+            <v-card-text>
+              <div class="text-h3 pa-12">Transaction sent!</div>
+              <div class="text-h4 pa-12">view your transaction here: {{}}</div>
+            </v-card-text>
+            <v-card-actions class="justify-end">
+              <v-btn
+                text
+                @click="dialog.value = false"
+              >Close</v-btn>
+            </v-card-actions>
+          </v-card>
+        </template>
+      </v-dialog>
+    </v-col>
+
   </v-container>
 </template>
 
 <script>
 import Moralis from 'moralis';
 import { myContractAddress, ABI } from '../constants/contract';
-// eslint-disable-next-line no-unused-vars
 import { getEllipsisTxt, tokenValue } from '../helpers/formatters.js';
 const { createAlchemyWeb3 } = require("@alch/alchemy-web3");
 
 const serverUrl = process.env.VUE_APP_MORALIS_SERVER_URL;
 const appId =  process.env.VUE_APP_MORALIS_APPLICATION_ID;
+
+const alchemyKey =  process.env.VUE_APP_ALCHEMY_KEY;
+
 Moralis.start({ serverUrl, appId });
 
 export default {
@@ -57,21 +91,27 @@ export default {
     mintAmount: 1,
     maxMintPerTx: 0,
     mintTransaction: null,
+
+    transactionLoading: false,
+    transactionDialog: false,
+
+    txHash: "",
   }),
 
   methods: {
     
     async init(){
       this.currentUser = Moralis.User.current();
+
       if(!this.currentUser){
         this.currentUser = await Moralis.authenticate();
       }
 
       await Moralis.enableWeb3();
-      this.web3Js = new createAlchemyWeb3("https://eth-rinkeby.alchemyapi.io/v2/30isD4FyByPb3DrMCVs6_gbLcKr8RyWI");
+      this.web3Js = new createAlchemyWeb3(alchemyKey);
       this.contract = new this.web3Js.eth.Contract(ABI, myContractAddress);
 
-      this.walletAddress = getEllipsisTxt(window.ethereum.selectedAddress);
+      this.walletAddress = window.ethereum.selectedAddress;
       this.currentChainId = await Moralis.chainId;
 
       // check if in correct network
@@ -79,18 +119,14 @@ export default {
         this.getContractDetails();
       }
 
-      this.ethers = Moralis.web3Library;
-      // this.provider = new this.ethers.providers.Web3Provider(window.ethereum);
-      // this.signer = this.provider.getSigner();
-
       // event listeners
       // Subscribe to onChainChanged events
       Moralis.onChainChanged((chain) => {
         this.currentChainId = chain;
-        this.onChainChanged();
+        this.refreshContractDetails();
       });
 
-      window.ethereum.on('accountsChanged', function (accounts) {
+      window.ethereum.on('accountsChanged', (accounts) => {
         // Time to reload your interface with accounts[0]!
         // this.updateWalletText(accounts[0]);
         this.walletAddress = accounts[0];
@@ -98,10 +134,10 @@ export default {
 
       // Subscribe to onWeb3Deactivated events
       Moralis.onWeb3Deactivated((result) => {
-        console.log(result)
+        this.logOut(result);
       });
       //
-      //
+      //event listeners
 
     },
 
@@ -110,8 +146,8 @@ export default {
       this.currentSupply = await Moralis.executeFunction({functionName: 'totalSupply', ...this.options});
       this.mintingCost = await Moralis.executeFunction({functionName: 'cost', ...this.options});
       this.newMintingCost = this.mintingCost;
-      let resulttMaxMint = await Moralis.executeFunction({functionName: 'maxMintAmountPerTx', ...this.options});
-      this.maxMintPerTx = resulttMaxMint.toNumber();
+      let resultMaxMint = await Moralis.executeFunction({functionName: 'maxMintAmountPerTx', ...this.options});
+      this.maxMintPerTx = resultMaxMint.toNumber();
     },
 
     updateWalletText(walletText){
@@ -119,14 +155,16 @@ export default {
     },
 
     // do chain change event
-    onChainChanged(){
+    refreshContractDetails(){
+
+      // reset mint amount
+      this.mintAmount = 1;
 
       // check if in correct network
       if(this.isCorrectChain){
         this.getContractDetails();
       }
       else{
-
         this.maxSupply = 0;
         this.currentSupply = 0;
         this.mintingCost = 0;
@@ -136,25 +174,47 @@ export default {
       
     },
 
-    async logIn(){
-
-    },
-
-    async logOut(){
+    async logOut(result){
       await Moralis.User.logOut();
-      console.log("logged out");
+      console.log(result);
     },
 
     async mint(){
+      
+      // do loading
+      this.transactionLoading = true;
 
-        // console.log(tokenValue(0.09, -18).toString());
-
-        this.contract.methods.mint(1).send({from: window.ethereum.selectedAddress, value: tokenValue(9, -16)}) // use variables instead of constant
-        .on('receipt', function(){
-            
-        });
+      // fire metamask tx
+      this.contract.methods.mint(this.mintAmount).send({from: window.ethereum.selectedAddress, value: this.newMintingCost})
+      .on('transactionHash', (hash) => {
+        if(hash){
+          this.transactionDialog = true;
+          this.txHash = hash;
+        }
+        // remove loading
+        this.transactionLoading = false;
+      })
+      .on('receipt', (receipt) => {
+        console.log(receipt);
+      })
+      .on('error', (error, receipt) => {
+        console.log(error);
+        console.log(receipt);
+        // remove loading
+        this.transactionLoading = false;
+      });
 
     },
+
+    incrementMintAmount(){
+      this.mintAmount = (this.mintAmount == this.maxMintPerTx) ? this.mintAmount : this.mintAmount+1;
+      this.newMintingCost = this.mintAmount * this.mintingCost;
+    },
+
+    decrementMintAmount(){
+      this.mintAmount = (this.mintAmount == 1) ? this.mintAmount : this.mintAmount-1;
+      this.newMintingCost = this.mintAmount * this.mintingCost;
+    }
 
   },
 
@@ -170,6 +230,10 @@ export default {
 
     isCorrectChain(){
       return this.chainId == this.currentChainId;
+    },
+
+    mintingCostText(){
+      return (this.newMintingCost > 0) ? tokenValue(this.newMintingCost, 18) : 0;
     }
 
   },
